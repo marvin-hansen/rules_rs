@@ -103,6 +103,7 @@ def _generate_hub_and_spokes(
         validate_lockfile,
         debug,
         use_legacy_rules_rust_platforms,
+        vendor_dir = "",
         dry_run = False):
     """Generates repositories for the transitive closure of the Cargo workspace.
 
@@ -120,6 +121,7 @@ def _generate_hub_and_spokes(
         cargo_config (label): .cargo/config.toml file
         validate_lockfile (bool): If true, validate we have appropriate versions in Cargo.lock
         debug (bool): Enable debug logging
+        vendor_dir (string): Workspace-relative directory holding vendored crate sources.
         dry_run (bool): Run all computations but do not create repos. Useful for benchmarking.
     """
     _date(mctx, "start")
@@ -285,6 +287,14 @@ def _generate_hub_and_spokes(
 
     use_home_cargo_credentials = bool(cargo_credentials)
 
+    # When `vendor_dir` is set, a registry crate whose sources are already checked out at
+    # <vendor_dir>/<name>-<version> is symlinked from there instead of being downloaded.
+    # Crates missing from the directory still fall back to the registry, so a vendored tree
+    # may be partial.
+    vendor_root = ""
+    if vendor_dir:
+        vendor_root = paths.join(_normalize_path(cargo_metadata["workspace_root"]), vendor_dir)
+
     for package in packages:
         crate_name = package["name"]
         version = package["version"]
@@ -360,6 +370,33 @@ crate.annotation(
             qualifiers = {}
             if source != CRATES_IO_REGISTRY:
                 qualifiers["repository_url"] = source.split("+", 1)[1]
+
+            vendored_path = ""
+            if vendor_root:
+                # A semver build metadata suffix is legal in a directory name but existing
+                # vendored trees (crate_universe's `crates_vendor`) replace `+` with `-`, so
+                # accept both spellings. openssl-src and pq-src are both in that shape and
+                # both carry source patches, so this is not a cosmetic fallback.
+                dir_name = "%s-%s" % (crate_name, version)
+                for candidate_name in [dir_name, dir_name.replace("+", "-")]:
+                    candidate = paths.join(vendor_root, candidate_name)
+                    if mctx.path(candidate).exists:
+                        vendored_path = candidate
+                        break
+
+            if vendored_path:
+                local_crate_repository(
+                    name = repo_name,
+                    additive_build_file = annotation.additive_build_file,
+                    additive_build_file_content = annotation.additive_build_file_content,
+                    gen_binaries = annotation.gen_binaries,
+                    patch_args = annotation.patch_args,
+                    patch_tool = annotation.patch_tool,
+                    patches = annotation.patches,
+                    path = vendored_path,
+                    **kwargs
+                )
+                continue
 
             crate_repository(
                 name = repo_name,
@@ -776,9 +813,9 @@ def _crate_impl(mctx):
 
             if cfg.debug:
                 for _ in range(25):
-                    _generate_hub_and_spokes(mctx, cfg.name, annotations, suggested_annotation_snippet_paths, cargo_path, cfg.cargo_lock, cargo_toml_by_hub_name[cfg.name], hub_packages, cfg.platform_triples, cargo_credentials, effective_cargo_config, cfg.validate_lockfile, cfg.debug, cfg.use_legacy_rules_rust_platforms, dry_run = True)
+                    _generate_hub_and_spokes(mctx, cfg.name, annotations, suggested_annotation_snippet_paths, cargo_path, cfg.cargo_lock, cargo_toml_by_hub_name[cfg.name], hub_packages, cfg.platform_triples, cargo_credentials, effective_cargo_config, cfg.validate_lockfile, cfg.debug, cfg.use_legacy_rules_rust_platforms, vendor_dir = cfg.vendor_dir, dry_run = True)
 
-            facts |= _generate_hub_and_spokes(mctx, cfg.name, annotations, suggested_annotation_snippet_paths, cargo_path, cfg.cargo_lock, cargo_toml_by_hub_name[cfg.name], hub_packages, cfg.platform_triples, cargo_credentials, effective_cargo_config, cfg.validate_lockfile, cfg.debug, cfg.use_legacy_rules_rust_platforms)
+            facts |= _generate_hub_and_spokes(mctx, cfg.name, annotations, suggested_annotation_snippet_paths, cargo_path, cfg.cargo_lock, cargo_toml_by_hub_name[cfg.name], hub_packages, cfg.platform_triples, cargo_credentials, effective_cargo_config, cfg.validate_lockfile, cfg.debug, cfg.use_legacy_rules_rust_platforms, vendor_dir = cfg.vendor_dir)
 
     # Lay down the git repos with generated per-crate BUILD overlays.
     git_repos = {}
@@ -892,6 +929,12 @@ _from_cargo = tag_class(
         ),
         "cargo_lock": attr.label(),
         "cargo_config": attr.label(),
+        "vendor_dir": attr.string(
+            doc = "Workspace-relative directory holding vendored crate sources, laid out as " +
+                  "`<name>-<version>/`. A registry crate found there is symlinked from the " +
+                  "vendored copy instead of downloaded; anything missing still falls back to " +
+                  "the registry, so a partial vendor directory is valid.",
+        ),
         "use_home_cargo_credentials": attr.bool(
             doc = "If set, the ruleset will load `~/cargo/credentials.toml` and attach those credentials to registry requests.",
         ),

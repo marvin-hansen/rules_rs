@@ -74,6 +74,58 @@ crate_repository = repository_rule(
     } | common_attrs,
 )
 
+# Bazel build files that must never be symlinked in from the crate's source directory.
+#
+# The generated BUILD.bazel is written into this repository below. If the source directory
+# already contains one -- which it does for a directory produced by crate_universe's
+# `crates_vendor`, and for any crate that vendors a hand-written overlay -- symlinking it
+# first means the write lands THROUGH the symlink and silently rewrites a checked-in file
+# in the user's workspace. Skipping the names here makes the generated file the only one,
+# and leaves the source tree read-only as a repository rule's inputs should be.
+_NON_VENDORED_ENTRIES = [
+    "BUILD",
+    "BUILD.bazel",
+    "MODULE.bazel",
+    "REPO.bazel",
+    "WORKSPACE",
+    "WORKSPACE.bazel",
+    "WORKSPACE.bzlmod",
+]
+
+def _copy_crate_sources(rctx, root):
+    """Materializes the crate sources instead of symlinking them.
+
+    `patch` rewrites files in place, and Bazel's native patch implementation follows a
+    symlink when it does. A symlinked source tree would therefore have the patch applied
+    to the checked-in file in the user's workspace rather than to this repository's copy
+    -- and applied again on every refetch, since the second attempt sees an already
+    patched file. Copying costs a crate's worth of I/O, which only patched crates pay.
+    """
+    if rctx.os.name.lower().startswith("windows"):
+        result = rctx.execute([
+            "cmd.exe",
+            "/c",
+            "xcopy",
+            str(root).replace("/", "\\") + "\\*",
+            ".",
+            "/E",
+            "/I",
+            "/Q",
+            "/Y",
+        ])
+    else:
+        result = rctx.execute(["cp", "-R", str(root) + "/.", "."])
+
+    if result.return_code != 0:
+        fail("failed to copy crate sources from {}:\n{}\n{}".format(
+            root,
+            result.stdout,
+            result.stderr,
+        ))
+
+    for name in _NON_VENDORED_ENTRIES:
+        rctx.delete(name)
+
 def _local_crate_repository_impl(rctx):
     if rctx.attr.strip_prefix:
         fail("strip_prefix not implemented")
@@ -82,8 +134,13 @@ def _local_crate_repository_impl(rctx):
     if not root.exists:
         fail("crate path %s does not exist" % rctx.attr.path)
 
-    for entry in root.readdir():
-        rctx.symlink(entry, entry.basename)
+    if rctx.attr.patches:
+        _copy_crate_sources(rctx, root)
+    else:
+        for entry in root.readdir():
+            if entry.basename in _NON_VENDORED_ENTRIES:
+                continue
+            rctx.symlink(entry, entry.basename)
 
     patch(rctx)
 
