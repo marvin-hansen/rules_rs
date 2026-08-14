@@ -28,9 +28,6 @@ load("//rs/private:registry_utils.bzl", "CRATES_IO_REGISTRY", "registry_config_r
 load("//rs/private:repository_utils.bzl", "render_select")
 load("//rs/private:toml2json.bzl", "run_toml2json")
 
-# Bazel 8 does not define attr.label_list_dict.
-_label_list_dict = getattr(attr, "label_list_dict", attr.string_list_dict)
-
 def _spoke_repo(hub_name, name, version):
     s = "%s__%s-%s" % (hub_name, name, version)
     if "+" in s:
@@ -725,7 +722,7 @@ def _crate_impl(mctx):
             fail("`.from_cargo` is required. Please update %s" % mod.name)
 
         for cfg in mod.tags.from_cargo:
-            annotations = build_annotation_map(mod, cfg.name)
+            annotations = build_annotation_map(mod, cfg.name, cfg.platform_triples)
             annotations_by_hub_name[cfg.name] = annotations
             mctx.watch(cfg.cargo_lock)
             mctx.watch(cfg.cargo_toml)
@@ -758,7 +755,7 @@ def _crate_impl(mctx):
 
     for mod in mctx.modules:
         for cfg in mod.tags.from_cargo:
-            annotations = build_annotation_map(mod, cfg.name)
+            annotations = annotations_by_hub_name[cfg.name]
             effective_cargo_config = cargo_config_by_hub_name[cfg.name]
             use_home_cargo_credentials = cfg.use_home_cargo_credentials or global_use_home_cargo_credentials
 
@@ -809,7 +806,7 @@ def _crate_impl(mctx):
             effective_cargo_config = cargo_config_by_hub_name[cfg.name]
             cargo_credentials = cargo_credentials_by_hub_name[cfg.name]
 
-            annotations = build_annotation_map(mod, cfg.name)
+            annotations = annotations_by_hub_name[cfg.name]
 
             if cfg.debug:
                 for _ in range(25):
@@ -821,7 +818,7 @@ def _crate_impl(mctx):
     git_repos = {}
     for mod in mctx.modules:
         for cfg in mod.tags.from_cargo:
-            annotations = build_annotation_map(mod, cfg.name)
+            annotations = annotations_by_hub_name[cfg.name]
             for package in packages_by_hub_name[cfg.name]:
                 source = package.get("source", "")
                 if not source.startswith("git+"):
@@ -954,22 +951,41 @@ _from_cargo = tag_class(
     },
 )
 
+_ANNOTATION_COMMON_ATTRS = {
+    "crate": attr.string(
+        doc = "The name of the crate the annotation is applied to",
+        mandatory = True,
+    ),
+    "version": attr.string(
+        doc = "The version of the crate the annotation is applied to. Defaults to all versions.",
+        default = "*",
+    ),
+    "repositories": attr.string_list(
+        doc = "Repository names specified by crate.from_cargo(name=...). Defaults to all repositories.",
+    ),
+}
+
+_ANNOTATION_SELECTABLE_ATTRS = {
+    "build_script_data": attr.label_list(
+        doc = "Labels to add to a crate's `cargo_build_script::data` attribute.",
+    ),
+    "build_script_env": attr.string_dict(
+        doc = "Environment variables to add to a crate's `cargo_build_script::env` attribute.",
+    ),
+    "build_script_tools": attr.label_list(
+        doc = "Labels to add to a crate's `cargo_build_script::tools` attribute.",
+    ),
+    "crate_features": attr.string_list(
+        doc = "Features to add to a crate's `rust_library::crate_features` attribute.",
+    ),
+    "rustc_flags": attr.string_list(
+        doc = "Flags to add to a crate's `rust_library::rustc_flags` attribute.",
+    ),
+}
+
 _annotation = tag_class(
     doc = "A collection of extra attributes and settings for a particular crate.",
-    attrs = {
-        "crate": attr.string(
-            doc = "The name of the crate the annotation is applied to",
-            mandatory = True,
-        ),
-        "version": attr.string(
-            doc = "The version of the crate the annotation is applied to. Defaults to all versions.",
-            default = "*",
-        ),
-        "repositories": attr.string_list(
-            doc = "A list of repository names specified from `crate.from_cargo(name=...)` that this annotation is applied to. Defaults to all repositories.",
-            default = [],
-        ),
-    } | {
+    attrs = _ANNOTATION_COMMON_ATTRS | _ANNOTATION_SELECTABLE_ATTRS | {
         "additive_build_file": attr.label(
             doc = "A file containing extra contents to write to the bottom of generated BUILD files.",
         ),
@@ -979,24 +995,12 @@ _annotation = tag_class(
         # "alias_rule": attr.string(
         #     doc = "Alias rule to use instead of `native.alias()`.  Overrides [render_config](#render_config)'s 'default_alias_rule'.",
         # ),
-        "build_script_data": attr.label_list(
-            doc = "A list of labels to add to a crate's `cargo_build_script::data` attribute.",
-        ),
         # "build_script_data_glob": attr.string_list(
         #     doc = "A list of glob patterns to add to a crate's `cargo_build_script::data` attribute",
         # ),
-        "build_script_data_select": _label_list_dict(
-            doc = "Labels to add to a crate's `cargo_build_script::data` attribute, keyed by platform triplet.",
-        ),
         # "build_script_deps": attr.label_list(
         #     doc = "A list of labels to add to a crate's `cargo_build_script::deps` attribute.",
         # ),
-        "build_script_env": attr.string_dict(
-            doc = "Additional environment variables to set on a crate's `cargo_build_script::env` attribute.",
-        ),
-        "build_script_env_select": attr.string_dict(
-            doc = "Additional environment variables to set on a crate's `cargo_build_script::env` attribute. Key should be the platform triplet. Value should be a JSON encoded dictionary mapping variable names to values, for example `{\"FOO\": \"bar\"}`.",
-        ),
         "build_script_env_files": attr.label_list(
             doc = "Files containing additional environment variables for a crate's `cargo_build_script`.",
             allow_files = True,
@@ -1020,12 +1024,6 @@ _annotation = tag_class(
         "build_script_tags": attr.string_list(
             doc = "A list of tags to add to a crate's `cargo_build_script` target.",
         ),
-        "build_script_tools": attr.label_list(
-            doc = "A list of labels to add to a crate's `cargo_build_script::tools` attribute.",
-        ),
-        "build_script_tools_select": _label_list_dict(
-            doc = "Labels to add to a crate's `cargo_build_script::tools` attribute, keyed by platform triplet.",
-        ),
         # "compile_data": attr.label_list(
         # doc = "A list of labels to add to a crate's `rust_library::compile_data` attribute.",
         # ),
@@ -1035,12 +1033,6 @@ _annotation = tag_class(
         # "compile_data_glob_excludes": attr.string_list(
         # doc = "A list of glob patterns to be excllued from a crate's `rust_library::compile_data` attribute.",
         # ),
-        "crate_features": attr.string_list(
-            doc = "A list of strings to add to a crate's `rust_library::crate_features` attribute.",
-        ),
-        "crate_features_select": attr.string_list_dict(
-            doc = "A list of strings to add to a crate's `rust_library::crate_features` attribute. Keys should be the platform triplet. Value should be a list of features.",
-        ),
         "data": attr.label_list(
             doc = "A list of labels to add to a crate's `rust_library::data` attribute.",
         ),
@@ -1100,12 +1092,6 @@ _annotation = tag_class(
         # "rustc_env_files": attr.label_list(
         #     doc = "A list of labels to set on a crate's `rust_library::rustc_env_files` attribute.",
         # ),
-        "rustc_flags": attr.string_list(
-            doc = "A list of strings to set on a crate's `rust_library::rustc_flags` attribute.",
-        ),
-        "rustc_flags_select": attr.string_list_dict(
-            doc = "A list of strings to set on a crate's `rust_library::rustc_flags` attribute. Keys should be the platform triplet. Value should be a list of flags.",
-        ),
         # "shallow_since": attr.string(
         #     doc = "An optional timestamp used for crates originating from a git repository instead of a crate registry. This flag optimizes fetching the source code.",
         # ),
@@ -1117,10 +1103,21 @@ _annotation = tag_class(
     },
 )
 
+_annotation_select = tag_class(
+    doc = "A collection of build attributes applied to a crate for selected platform triples. Source attributes such as patches and workspace_cargo_toml belong on crate.annotation.",
+    attrs = _ANNOTATION_COMMON_ATTRS | {
+        "triples": attr.string_list(
+            doc = "Platform triples to which the annotation applies.",
+            mandatory = True,
+        ),
+    } | _ANNOTATION_SELECTABLE_ATTRS,
+)
+
 crate = module_extension(
     implementation = _crate_impl,
     tag_classes = {
         "annotation": _annotation,
+        "annotation_select": _annotation_select,
         "config": _config,
         "from_cargo": _from_cargo,
     },
