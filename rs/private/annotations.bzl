@@ -329,25 +329,27 @@ _LABEL_FIELDS = [
 
 _SINGLE_LABEL_FIELDS = ["additive_build_file"]
 
-def _metadata_label(value):
-    """Anchor a label string from Cargo.toml to the root module.
+def _metadata_label(anchor, value):
+    """Resolve a label string from Cargo.toml against the module that supplied the manifest.
 
-    A tag's label attributes are anchored by Bazel to the module that declared the
-    tag. A string out of TOML has no such anchor, and resolving it here would anchor
-    it to rules_rs instead -- measured, not assumed: a bare `//pkg:x` resolves to the
-    extension's own module, and `@//pkg:x` fails outright with "no repository visible
-    as '@' in the extension". `@@//` is the canonical main repository and resolves
-    correctly, so a leading `//` is rewritten to it and authors keep writing ordinary
-    labels.
+    A tag's label attributes are anchored by Bazel to the module that declared the tag. A
+    string out of TOML has no such anchor, and resolving it here would anchor it to
+    rules_rs -- measured, not assumed: a bare `//pkg:x` resolved inside the extension
+    lands in the EXTENSION's module.
 
-    Consequence: metadata annotations are a root-module feature, because `@@//` is the
-    main repository regardless of which module's manifest they came from.
+    `anchor` is the cargo_toml Label the root module passed to from_cargo, so it carries
+    that module's repository mapping. Label.relative() resolves against it, which makes
+    `//third_party/...` mean what the manifest's author expects.
+
+    Apparent EXTERNAL repository names (`@zstd`) are the one thing this cannot do:
+    Label.relative resolves the package path against the anchor but still looks the repo
+    name up in the extension's mapping, which fails with "no repository visible as
+    '@zstd'". Declare those with crate.repo_alias in MODULE.bazel and refer to the alias
+    by name -- declaring a module dependency is the module file's job.
     """
-    if value.startswith("//"):
-        return Label("@@" + value)
-    return Label(value)
+    return anchor.relative(value)
 
-def _annotation_record(crate, values, triples = None):
+def _annotation_record(anchor, aliases, crate, values, triples = None):
     fields = dict(_TAG_FIELD_DEFAULTS)
 
     for key, value in values.items():
@@ -366,9 +368,9 @@ def _annotation_record(crate, values, triples = None):
         if not value:
             continue
         if field in _SINGLE_LABEL_FIELDS:
-            fields[field] = _metadata_label(value)
+            fields[field] = _metadata_label(anchor, aliases.get(value, value))
         else:
-            fields[field] = [_metadata_label(item) for item in value]
+            fields[field] = [_metadata_label(anchor, aliases.get(item, item)) for item in value]
 
     # `repositories` is deliberately empty: an annotation in a workspace's Cargo.toml
     # belongs to that workspace's from_cargo repository by construction, so the field
@@ -380,11 +382,15 @@ def _annotation_record(crate, values, triples = None):
         fields["triples"] = triples
     return struct(**fields)
 
-def annotation_records_from_metadata(cargo_toml_json):
+def annotation_records_from_metadata(cargo_toml_json, anchor, aliases = {}):
     """Build annotation/annotation_select records from a parsed Cargo.toml.
 
     Args:
         cargo_toml_json (dict): Parsed Cargo.toml of the workspace being resolved.
+        anchor (Label): The cargo_toml label, used to resolve label strings against the
+            module that declared it.
+        aliases (dict): name -> label string, from crate.repo_alias, so a manifest can
+            name an external repository that only the root module can see.
 
     Returns:
         A tuple (annotations, selects) of tag-shaped records.
@@ -402,13 +408,13 @@ def annotation_records_from_metadata(cargo_toml_json):
         if type(values) != "dict":
             fail("rules_rs annotation for crate %s must be a table, got %s" % (crate, type(values)))
 
-        annotations.append(_annotation_record(crate, values))
+        annotations.append(_annotation_record(anchor, aliases, crate, values))
 
         for select in values.get("select", []):
             triples = select.get("triples")
             if not triples:
                 fail("rules_rs annotation select for crate %s must set `triples`" % crate)
             selected = {k: v for k, v in select.items() if k != "triples"}
-            selects.append(_annotation_record(crate, selected, triples = triples))
+            selects.append(_annotation_record(anchor, aliases, crate, selected, triples = triples))
 
     return annotations, selects

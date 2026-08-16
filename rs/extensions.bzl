@@ -685,8 +685,15 @@ def _crate_impl(mctx):
             fail("`.from_cargo` is required. Please update %s" % mod.name)
 
         for cfg in mod.tags.from_cargo:
+            repo_aliases = {
+                tag.name: str(tag.repo)
+                for module in mctx.modules
+                for tag in module.tags.repo_alias
+            }
             metadata_annotations, metadata_selects = annotation_records_from_metadata(
                 run_toml2json(mctx, mctx.path(cfg.cargo_toml)),
+                cfg.cargo_toml,
+                repo_aliases,
             )
             annotations = build_annotation_map(
                 list(mod.tags.annotation) + metadata_annotations,
@@ -1068,6 +1075,29 @@ _annotation = tag_class(
     },
 )
 
+# Names an external repository so a Cargo.toml annotation can refer to it.
+#
+# Label.relative() resolves a manifest's `//...` strings against the root module, but an
+# apparent external repo name is still looked up in this extension's mapping, where a
+# consumer's bazel_dep is not visible. Declaring the dependency stays a MODULE.bazel job;
+# this makes the manifest able to USE it:
+#
+#     crate.repo_alias(name = "zstd", repo = "@zstd")   # MODULE.bazel, once
+#     deps = ["zstd"]                                   # Cargo.toml, thereafter
+_repo_alias = tag_class(
+    doc = "Expose an external repository to Cargo.toml annotations under a short name.",
+    attrs = {
+        "name": attr.string(
+            doc = "Name used in Cargo.toml annotation label fields.",
+            mandatory = True,
+        ),
+        "repo": attr.label(
+            doc = "The target the name resolves to, in the declaring module's mapping.",
+            mandatory = True,
+        ),
+    },
+)
+
 _annotation_select = tag_class(
     doc = "A collection of build attributes applied to a crate for selected platform triples. Source attributes such as patches and workspace_cargo_toml belong on crate.annotation.",
     attrs = _ANNOTATION_COMMON_ATTRS | {
@@ -1083,6 +1113,7 @@ crate = module_extension(
     tag_classes = {
         "annotation": _annotation,
         "annotation_select": _annotation_select,
+        "repo_alias": _repo_alias,
         "config": _config,
         "from_cargo": _from_cargo,
     },

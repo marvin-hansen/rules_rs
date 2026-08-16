@@ -1,0 +1,32 @@
+--- a/rust/private/rustc.bzl
++++ b/rust/private/rustc.bzl
+@@ -2161,11 +2161,24 @@
+         checked_outputs = [output_o] if scan_msvc_archive_object else [outputs[0]]
+         if output_o and output_o != checked_outputs[0]:
+             checked_outputs.append(output_o)
+-        args.process_wrapper_flags.add_all(
+-            checked_outputs,
+-            before_each = "--check-output-for-working-dir",
+-            expand_directories = False,
+-        )
++        # A crate may opt out with tags = ["no-check-output-for-working-dir"], which
++        # crate.annotation already knows how to set, so this needs no new API.
++        #
++        # The check's advice -- stop retaining env!("CARGO_MANIFEST_DIR") or
++        # env!("OUT_DIR") -- assumes the path came from Rust. For a crate that statically
++        # links a C library built from source, it did not: OpenSSL records ENGINESDIR,
++        # MODULESDIR and its full compiler command line into libcrypto.a by design (they
++        # are what `openssl version -a` prints), openssl-sys links that archive, and no
++        # change to any Rust source can remove them. Without an opt-out such a crate is
++        # simply unbuildable.
++        # getattr, not ctx.attr.tags: rustc_compile is reached from the prost aspect too,
++        # and an aspect context has no `tags` attribute.
++        if "no-check-output-for-working-dir" not in getattr(ctx.attr, "tags", []):
++            args.process_wrapper_flags.add_all(
++                checked_outputs,
++                before_each = "--check-output-for-working-dir",
++                expand_directories = False,
++            )
+ 
+         # Run as normal
+         ctx.actions.run(

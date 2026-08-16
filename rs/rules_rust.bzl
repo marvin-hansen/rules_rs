@@ -27,7 +27,14 @@ def _rules_rust_impl(mctx):
     if len(strip_values) > 1:
         fail("Found conflicting strip values in rules_rust.patch tags")
 
-    strip = list(strip_values)[0] if strip_values else 0
+    # The working-dir check opt-out ships with rules_rs rather than being something every
+    # consumer has to carry. See the patch header: the check cannot be satisfied by a crate
+    # that statically links a C library which records its own build paths.
+    patches = [Label("//patches:rustc_working_dir_check_opt_out.patch")] + patches
+
+    # -p1, because the bundled patch above needs it. Additional patches supplied through
+    # the tag must use the same strip; http_archive applies one value to all of them.
+    strip = list(strip_values)[0] if strip_values else 1
 
     http_archive(
         name = "rules_rust",
