@@ -65,7 +65,7 @@ Change shape:
 Everything downstream -- select merging, wildcard versions, `_fill_select_defaults`,
 the windows-gnullvm implicit annotations -- is untouched.
 
-### The one hard part: label anchoring
+### Label anchoring -- SETTLED
 
 `_merge_annotation_select` carries this comment:
 
@@ -74,19 +74,64 @@ the windows-gnullvm implicit annotations -- is untouched.
 
 Bazel anchors `attr.label_list` values in a tag to the module that declared the tag.
 A string out of TOML has no such anchor, and `patches`, `additive_build_file`, `data`,
-`deps` and `build_script_tools` are all label-valued. Resolving them relative to the
-`.bzl` file would anchor them to `rules_rs`, which is wrong -- they belong to the root
-module, whose `Cargo.toml` this is.
+`deps` and `build_script_tools` are all label-valued.
 
-Options, in preference order:
+Measured with a two-module workspace holding a same-path file with different contents
+in the root module and in the extension's module, resolving a bare string inside the
+extension's `.bzl` (no tag anywhere):
 
-1. Require apparent-repo-qualified labels in metadata (`@//third_party/...`) and
-   resolve against the root module's repo mapping.
-2. Resolve relative to the directory of the `Cargo.toml` the metadata came from,
-   which matches the intuition that these are paths in the consuming workspace.
+| label string passed to `Label()` in the extension | resolves to |
+| ------------------------------------------------- | ----------- |
+| `//pkg:thing.txt`                                  | the EXTENSION's module -- the failure mode |
+| `@//pkg:thing.txt`                                 | hard error: `no repository visible as '@' in the extension` |
+| `@@//pkg:thing.txt`                                | the ROOT module -- correct |
 
-This needs a spike before the rest is worth writing; it is the only part that can
-make the feature unimplementable rather than merely fiddly.
+So the feature is implementable, and the anchor is `@@//`.
+
+Users must not have to write canonical-repo syntax in a `Cargo.toml`, so the
+extension normalises: a metadata value beginning `//` is rewritten to `@@//` before
+`Label()`. Authors write `//third_party/rust_patches/openssl.patch`.
+
+Consequence worth documenting: `@@//` is the MAIN repository, so annotations in
+`[workspace.metadata]` are a root-module feature. A non-root module's manifest
+annotations would resolve against the main repo, which is wrong. This matches the
+intended use -- you annotate your own dependencies -- but it should fail loudly rather
+than silently mis-resolve.
+
+## Testing plan
+
+The repo already contains the exact A/B needed.
+
+`test/MODULE.bazel` has:
+
+```python
+crate.annotation(
+    crate = "member_foo",
+    crate_features = ["json"],
+    repositories = ["workspace_member_annotation_features"],
+)
+```
+
+against `test/workspace_member_annotation_features/Cargo.toml`, which is three lines.
+Moving that annotation into the workspace's own manifest as
+
+```toml
+[workspace.metadata.rules_rs.annotations."member_foo"]
+crate_features = ["json"]
+```
+
+and keeping the existing test green is the equivalence proof: the test already
+establishes that the annotation takes effect, so only its source changes.
+
+For select coverage, the `build_script_env_select` test repository already exercises
+`crate.annotation_select` with `triples` plus per-triple `build_script_env` and
+`build_script_tools` -- the same move proves the `[[...select]]` encoding, including
+the env-map merging that `_merge_select_maps` treats specially.
+
+Note an ergonomic win to call out in the PR: `repositories = [...]` disappears in the
+metadata form. An annotation in a workspace's `Cargo.toml` is scoped to that
+workspace's `from_cargo` repository by construction, so the field that exists purely
+to re-attach an annotation to its manifest becomes unnecessary.
 
 ## 2. Vendoring
 
