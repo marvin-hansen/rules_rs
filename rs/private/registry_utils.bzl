@@ -46,16 +46,47 @@ def registry_download_template(config):
     Returns:
         A download URL template using Cargo's registry placeholders.
     """
+    return registry_download_templates(config)[0]
+
+def registry_download_templates(config):
+    """Returns the crate download templates from a registry config, best first.
+
+    A registry whose `dl` carries no placeholders gets the Cargo-spec suffix
+    `/{crate}/{version}/download`. That URL works, but its basename is literally
+    "download" for every crate in the registry, and Bazel matches `--distdir` and its
+    repository cache on the basename of the FIRST url only -- measured, with an
+    isolated repository cache per case:
+
+        urls                                          distdir
+        ["...serde-1.0.219.crate"]                    HIT
+        ["...1.0.219/download"]                       miss
+        ["...1.0.219/download", "...serde-1.0.219.crate"]  miss
+
+    So an offline mirror of a registry is unreachable unless a `{crate}-{version}.crate`
+    URL comes first. crates.io serves that form, and it is the name Cargo's own
+    registry cache uses. Emit it first and keep the spec URL as a fallback, so a
+    registry that only implements the spec form still resolves, at the cost of one
+    404 on the way.
+
+    Args:
+        config: Decoded registry config.json object.
+
+    Returns:
+        A list of download URL templates using Cargo's registry placeholders.
+    """
     dl = config["dl"]
-    if not (
+    if (
         "{crate}" in dl or
         "{version}" in dl or
         "{sha256-checksum}" in dl or
         "{prefix}" in dl or
         "{lowerprefix}" in dl
     ):
-        dl += "/{crate}/{version}/download"
-    return dl
+        return [dl]
+    return [
+        dl + "/{crate}/{crate}-{version}.crate",
+        dl + "/{crate}/{version}/download",
+    ]
 
 def registry_download_url_from_template(template, crate, version, checksum):
     """Expands a registry download template for one crate.

@@ -41,12 +41,16 @@ def _crate_repository_impl(rctx):
 
     dl = rctx.read(rctx.attr.registry_config)
 
-    url = registry_download_url_from_template(dl, crate_name, version, sha256)
+    urls = [
+        registry_download_url_from_template(template, crate_name, version, sha256)
+        for template in dl.split("\n")
+        if template
+    ]
 
     rctx.download_and_extract(
-        url,
+        urls,
         type = "tar.gz",
-        canonical_id = get_default_canonical_id(rctx, urls = [url]),
+        canonical_id = get_default_canonical_id(rctx, urls = urls),
         headers = headers,
         strip_prefix = "%s-%s" % (crate_name, version),
         sha256 = sha256,
