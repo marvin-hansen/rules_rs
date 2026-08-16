@@ -41,7 +41,7 @@ rules_rust = use_extension("@rules_rs//rs:rules_rust.bzl", "rules_rust")
 use_repo(rules_rust, "rules_rust")
 
 register_toolchains(
-    "@default_rust_toolchains//:all",
+    "@default_rust_toolchains//...",
     "@llvm//toolchain:all",
 )
 
@@ -63,6 +63,37 @@ use_repo(crate, "crates")
 ```
 
 `platform_triples` should include every exec and target triple that can participate in the build. For the common case, include the host triples you use locally and in CI plus the target triples you build for.
+
+### Rust toolchain archives
+
+Stable Rust toolchains use Zstandard-compressed archives from
+[hermeticbuild/rust-redist](https://github.com/hermeticbuild/rust-redist) when
+available. Other stable versions and nightly toolchains continue to use
+`static.rust-lang.org`.
+
+Set `use_rust_redist = False` to download a toolchain and its configured
+rustfmt and rust-analyzer versions directly from `static.rust-lang.org`:
+
+```bzl
+toolchains.toolchain(
+    edition = "2024",
+    version = "1.97.1",
+    use_rust_redist = False,
+)
+```
+
+`MODULE.bazel.lock` records the selected archive filenames and SHA-256 values.
+Existing `.tar.xz` archives remain locked to `static.rust-lang.org` after a
+redistributed release becomes available. Update the lockfile to use the new
+`.tar.zst` archives with:
+
+```shell
+bazel mod deps --lockfile_mode=update --repo_env=RULES_RS_RUST_REDIST_REFRESH=1
+bazel mod deps --lockfile_mode=update
+```
+
+The second command restores the normal environment before the updated lockfile
+is committed.
 
 ### Global Cargo configuration
 
@@ -138,6 +169,52 @@ as `@rules_rust`, replace `@rules_rust//tools/rust_analyzer:setup` in the
 upstream instructions with `@rules_rs//tools/rust_analyzer:setup`.
 
 ## Advanced Options
+
+<details>
+<summary>Register a custom Rust compiler</summary>
+
+`declare_rustc_toolchains` accepts a custom compiler and reuses the generated
+toolchain's standard libraries, rustdoc, Cargo, Clippy, and linkers.
+
+Create a dedicated `toolchains/BUILD.bazel` package:
+
+```bzl
+load("@rules_rs//rs/toolchains:declare_rustc_toolchains.bzl", "declare_rustc_toolchains")
+
+declare_rustc_toolchains(
+    name = "custom_rust",
+    edition = "2024",
+    rustc = {
+        "aarch64-apple-darwin": "//tools/rust:rustc_macos_arm64",
+        "x86_64-unknown-linux-gnu": "//tools/rust:rustc_linux_x86_64",
+    },
+    version = "1.92.0",
+)
+```
+
+A `rustc` dictionary selects execution triples automatically. A single compiler
+label can instead be combined with `exec_triples`. Use `target_triples` to limit
+supported target platforms. Omit `rustc` to use the generated compiler while
+overriding another component.
+
+Register the custom package instead of the generated Rust compiler toolchains in
+`MODULE.bazel`:
+
+```bzl
+register_toolchains(
+    "//toolchains:all",
+    "@default_rust_toolchains//rustfmt:all",
+    "@default_rust_toolchains//rust-analyzer:all",
+    "@llvm//toolchain:all",
+)
+```
+
+Keep `@default_rust_toolchains` available through `use_repo` for inherited
+compiler components.
+Override `rustc_lib`, `rust_doc`, `cargo`, `clippy_driver`, `cargo_clippy`,
+`rust_objcopy`, `rust_lld`, `bpf_linker`, or `rust_std` when necessary.
+
+</details>
 
 <details>
 <summary>Reference targets added by <code>crate.annotation</code></summary>
