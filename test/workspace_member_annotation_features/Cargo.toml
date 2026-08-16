@@ -1,3 +1,10 @@
 [workspace]
 members = ["member_foo", "member_bar"]
 resolver = "3"
+
+# Same annotation that used to live in //test:MODULE.bazel as
+#     crate.annotation(crate = "member_foo", crate_features = ["json"],
+#                      repositories = ["workspace_member_annotation_features"])
+# `repositories` is gone: this manifest already identifies the hub.
+[workspace.metadata.rules_rs.annotations."member_foo"]
+crate_features = ["json"]

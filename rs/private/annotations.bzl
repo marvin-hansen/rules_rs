@@ -210,10 +210,18 @@ def _annotation_entry():
         "selects": {},
     }
 
-def build_annotation_map(mod, cfg_name, platform_triples):
-    """Build mapping {crate: {version|\"*\": annotation}} for a cfg name."""
+def build_annotation_map(annotation_tags, annotation_select_tags, cfg_name, platform_triples):
+    """Build mapping {crate: {version|\"*\": annotation}} for a cfg name.
+
+    Args:
+        annotation_tags: annotation records, from crate.annotation tags and/or from
+            Cargo.toml metadata. The two are shaped identically on purpose.
+        annotation_select_tags: annotation_select records, same.
+        cfg_name (string): Hub name being resolved.
+        platform_triples (list): Triples the hub resolves for.
+    """
     annotations = {}
-    for annotation in mod.tags.annotation:
+    for annotation in annotation_tags:
         if annotation.repositories and cfg_name not in annotation.repositories:
             continue
 
@@ -224,7 +232,7 @@ def build_annotation_map(mod, cfg_name, platform_triples):
             fail("Duplicate crate.annotation for %s version %s in repo %s" % (annotation.crate, version_key, cfg_name))
         entry["annotation"] = _annotation_values(annotation)
 
-    for annotation in mod.tags.annotation_select:
+    for annotation in annotation_select_tags:
         if annotation.repositories and cfg_name not in annotation.repositories:
             continue
 
@@ -256,3 +264,151 @@ def well_known_annotation_snippet_paths(mctx):
         crate_dir.basename: crate_dir.get_child("include.MODULE.bazel")
         for crate_dir in mctx.path(Label("//:3rd_party")).readdir()
     }
+
+# --- Annotations declared in Cargo.toml -------------------------------------------
+#
+# Annotations are conventionally declared as crate.annotation tags in MODULE.bazel.
+# That puts them in a different file from the [workspace.dependencies] entry they
+# modify, and in a large consumer it dominates the module file entirely -- 83% of one
+# real MODULE.bazel. Cargo reserves `[workspace.metadata]` for exactly this: it warns
+# about nothing, preserves the table verbatim, and `cargo metadata` returns it under
+# the top-level "metadata" key.
+#
+#     [workspace.metadata.rules_rs.annotations."openssl-src"]
+#     gen_build_script = "off"
+#     patches = ["//third_party/rust_patches/openssl.patch"]
+#
+#     [[workspace.metadata.rules_rs.annotations."openssl-src".select]]
+#     triples = ["aarch64-unknown-linux-gnu"]
+#     rustc_flags = ["-Ctarget-feature=+neon"]
+#
+# These records are shaped exactly like the tag classes, so build_annotation_map and
+# everything downstream cannot tell the two sources apart.
+
+# Tag-class defaults, reproduced exactly. Note that string attributes default to ""
+# where the internal annotation representation uses None; annotation_for compares
+# against these to decide whether a field was set, so a mismatch here silently
+# changes wildcard merging rather than failing.
+_TAG_FIELD_DEFAULTS = {
+    "additive_build_file": None,
+    "additive_build_file_content": "",
+    "allow_build_script_to_detect_nonhermetic_paths": False,
+    "build_script_data": [],
+    "build_script_env": {},
+    "build_script_env_files": [],
+    "build_script_tags": [],
+    "build_script_toolchains": [],
+    "build_script_tools": [],
+    "crate_features": [],
+    "data": [],
+    "deps": [],
+    "extra_aliased_targets": {},
+    "gen_binaries": [],
+    "gen_build_script": "auto",
+    "link_deps": [],
+    "patch_args": [],
+    "patch_tool": "",
+    "patches": [],
+    "rustc_flags": [],
+    "strip_prefix": "",
+    "tags": [],
+    "workspace_cargo_toml": "Cargo.toml",
+}
+
+# Fields Bazel would have resolved as labels had they come from a tag class.
+_LABEL_FIELDS = [
+    "additive_build_file",
+    "build_script_data",
+    "build_script_env_files",
+    "build_script_toolchains",
+    "build_script_tools",
+    "data",
+    "deps",
+    "patches",
+]
+
+_SINGLE_LABEL_FIELDS = ["additive_build_file"]
+
+def _metadata_label(value):
+    """Anchor a label string from Cargo.toml to the root module.
+
+    A tag's label attributes are anchored by Bazel to the module that declared the
+    tag. A string out of TOML has no such anchor, and resolving it here would anchor
+    it to rules_rs instead -- measured, not assumed: a bare `//pkg:x` resolves to the
+    extension's own module, and `@//pkg:x` fails outright with "no repository visible
+    as '@' in the extension". `@@//` is the canonical main repository and resolves
+    correctly, so a leading `//` is rewritten to it and authors keep writing ordinary
+    labels.
+
+    Consequence: metadata annotations are a root-module feature, because `@@//` is the
+    main repository regardless of which module's manifest they came from.
+    """
+    if value.startswith("//"):
+        return Label("@@" + value)
+    return Label(value)
+
+def _annotation_record(crate, values, triples = None):
+    fields = dict(_TAG_FIELD_DEFAULTS)
+
+    for key, value in values.items():
+        if key == "select":
+            continue
+        if key not in fields:
+            fail("Unknown rules_rs annotation field %r for crate %s in Cargo.toml metadata. Known fields: %s" % (
+                key,
+                crate,
+                ", ".join(sorted(fields)),
+            ))
+        fields[key] = value
+
+    for field in _LABEL_FIELDS:
+        value = fields[field]
+        if not value:
+            continue
+        if field in _SINGLE_LABEL_FIELDS:
+            fields[field] = _metadata_label(value)
+        else:
+            fields[field] = [_metadata_label(item) for item in value]
+
+    # `repositories` is deliberately empty: an annotation in a workspace's Cargo.toml
+    # belongs to that workspace's from_cargo repository by construction, so the field
+    # that exists to re-attach an annotation to its manifest is unnecessary here.
+    fields["crate"] = crate
+    fields["version"] = values.get("version", "")
+    fields["repositories"] = []
+    if triples != None:
+        fields["triples"] = triples
+    return struct(**fields)
+
+def annotation_records_from_metadata(cargo_toml_json):
+    """Build annotation/annotation_select records from a parsed Cargo.toml.
+
+    Args:
+        cargo_toml_json (dict): Parsed Cargo.toml of the workspace being resolved.
+
+    Returns:
+        A tuple (annotations, selects) of tag-shaped records.
+    """
+    metadata = {}
+    for root in ["workspace", "package"]:
+        section = cargo_toml_json.get(root, {}).get("metadata", {}).get("rules_rs", {})
+        if section:
+            metadata = section
+            break
+
+    annotations = []
+    selects = []
+    for crate, values in metadata.get("annotations", {}).items():
+        if type(values) != "dict":
+            fail("rules_rs annotation for crate %s must be a table, got %s" % (crate, type(values)))
+
+        annotations.append(_annotation_record(crate, values))
+
+        for select in values.get("select", []):
+            triples = select.get("triples")
+            if not triples:
+                fail("rules_rs annotation select for crate %s must set `triples`" % crate)
+            selected = {k: v for k, v in select.items() if k != "triples"}
+            selects.append(_annotation_record(crate, selected, triples = triples))
+
+    return annotations, selects

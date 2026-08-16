@@ -1,7 +1,7 @@
 load("@bazel_lib//lib:repo_utils.bzl", "repo_utils")
 load("@bazel_skylib//lib:paths.bzl", "paths")
 load("@rs_rust_host_tools//:defs.bzl", "RS_HOST_CARGO_LABEL")
-load("//rs/private:annotations.bzl", "annotation_for", "build_annotation_map", "well_known_annotation_snippet_paths")
+load("//rs/private:annotations.bzl", "annotation_for", "annotation_records_from_metadata", "build_annotation_map", "well_known_annotation_snippet_paths")
 load("//rs/private:cargo_credentials.bzl", "load_cargo_credentials")
 load(
     "//rs/private:cargo_workspace_graph.bzl",
@@ -685,7 +685,15 @@ def _crate_impl(mctx):
             fail("`.from_cargo` is required. Please update %s" % mod.name)
 
         for cfg in mod.tags.from_cargo:
-            annotations = build_annotation_map(mod, cfg.name, cfg.platform_triples)
+            metadata_annotations, metadata_selects = annotation_records_from_metadata(
+                run_toml2json(mctx, mctx.path(cfg.cargo_toml)),
+            )
+            annotations = build_annotation_map(
+                list(mod.tags.annotation) + metadata_annotations,
+                list(mod.tags.annotation_select) + metadata_selects,
+                cfg.name,
+                cfg.platform_triples,
+            )
             annotations_by_hub_name[cfg.name] = annotations
             mctx.watch(cfg.cargo_lock)
             mctx.watch(cfg.cargo_toml)

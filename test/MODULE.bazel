@@ -217,11 +217,9 @@ crate.annotation(
     crate = "tokenizers",
     workspace_cargo_toml = "tokenizers/Cargo.toml",
 )
-crate.annotation(
-    crate = "member_foo",
-    crate_features = ["json"],
-    repositories = ["workspace_member_annotation_features"],
-)
+# Moved to test/workspace_member_annotation_features/Cargo.toml as
+# [workspace.metadata.rules_rs.annotations."member_foo"]. The build result must be
+# identical -- that equivalence is the point of the test.
 
 # Test gen_binaries
 crate.annotation(
